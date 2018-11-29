@@ -1,6 +1,113 @@
 #include "cache.h"
+#include "color.h"
+#include "config.h"
 #include "pkt-line.h"
 #include "sideband.h"
+#include "help.h"
+
+struct keyword_entry {
+	/*
+	 * We use keyword as config key so it should be a single alphanumeric word.
+	 */
+	const char *keyword;
+	char color[COLOR_MAXLEN];
+};
+
+static struct keyword_entry keywords[] = {
+	{ "hint",	GIT_COLOR_YELLOW },
+	{ "warning",	GIT_COLOR_BOLD_YELLOW },
+	{ "success",	GIT_COLOR_BOLD_GREEN },
+	{ "error",	GIT_COLOR_BOLD_RED },
+};
+
+/* Returns a color setting (GIT_COLOR_NEVER, etc). */
+static int use_sideband_colors(void)
+{
+	static int use_sideband_colors_cached = -1;
+
+	const char *key = "color.remote";
+	struct strbuf sb = STRBUF_INIT;
+	char *value;
+	int i;
+
+	if (use_sideband_colors_cached >= 0)
+		return use_sideband_colors_cached;
+
+	if (!git_config_get_string(key, &value)) {
+		use_sideband_colors_cached = git_config_colorbool(key, value);
+	} else if (!git_config_get_string("color.ui", &value)) {
+		use_sideband_colors_cached = git_config_colorbool("color.ui", value);
+	} else {
+		use_sideband_colors_cached = GIT_COLOR_AUTO;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(keywords); i++) {
+		strbuf_reset(&sb);
+		strbuf_addf(&sb, "%s.%s", key, keywords[i].keyword);
+		if (git_config_get_string(sb.buf, &value))
+			continue;
+		if (color_parse(value, keywords[i].color))
+			continue;
+	}
+	strbuf_release(&sb);
+	return use_sideband_colors_cached;
+}
+
+void list_config_color_sideband_slots(struct string_list *list, const char *prefix)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(keywords); i++)
+		list_config_item(list, prefix, keywords[i].keyword);
+}
+
+/*
+ * Optionally highlight one keyword in remote output if it appears at the start
+ * of the line. This should be called for a single line only, which is
+ * passed as the first N characters of the SRC array.
+ *
+ * NEEDSWORK: use "size_t n" instead for clarity.
+ */
+static void maybe_colorize_sideband(struct strbuf *dest, const char *src, int n)
+{
+	int i;
+
+	if (!want_color_stderr(use_sideband_colors())) {
+		strbuf_add(dest, src, n);
+		return;
+	}
+
+	while (0 < n && isspace(*src)) {
+		strbuf_addch(dest, *src);
+		src++;
+		n--;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(keywords); i++) {
+		struct keyword_entry *p = keywords + i;
+		int len = strlen(p->keyword);
+
+		if (n <= len)
+			continue;
+		/*
+		 * Match case insensitively, so we colorize output from existing
+		 * servers regardless of the case that they use for their
+		 * messages. We only highlight the word precisely, so
+		 * "successful" stays uncolored.
+		 */
+		if (!strncasecmp(p->keyword, src, len) && !isalnum(src[len])) {
+			strbuf_addstr(dest, p->color);
+			strbuf_add(dest, src, len);
+			strbuf_addstr(dest, GIT_COLOR_RESET);
+			n -= len;
+			src += len;
+			break;
+		}
+	}
+
+	strbuf_add(dest, src, n);
+}
+
 
 /*
  * Receive multiplexed output stream over git native protocol.
@@ -13,120 +120,106 @@
  * the remote died unexpectedly.  A flush() concludes the stream.
  */
 
-#define PREFIX "remote:"
+#define DISPLAY_PREFIX "remote: "
 
 #define ANSI_SUFFIX "\033[K"
 #define DUMB_SUFFIX "        "
 
-#define FIX_SIZE 10  /* large enough for any of the above */
-
 int recv_sideband(const char *me, int in_stream, int out)
 {
-	unsigned pf = strlen(PREFIX);
-	unsigned sf;
-	char buf[LARGE_PACKET_MAX + 2*FIX_SIZE];
-	char *suffix, *term;
-	int skip_pf = 0;
+	const char *suffix;
+	char buf[LARGE_PACKET_MAX + 1];
+	struct strbuf outbuf = STRBUF_INIT;
+	int retval = 0;
 
-	memcpy(buf, PREFIX, pf);
-	term = getenv("TERM");
-	if (isatty(2) && term && strcmp(term, "dumb"))
+	if (isatty(2) && !is_terminal_dumb())
 		suffix = ANSI_SUFFIX;
 	else
 		suffix = DUMB_SUFFIX;
-	sf = strlen(suffix);
 
-	while (1) {
+	while (!retval) {
+		const char *b, *brk;
 		int band, len;
-		len = packet_read(in_stream, NULL, NULL, buf + pf, LARGE_PACKET_MAX, 0);
+		len = packet_read(in_stream, NULL, NULL, buf, LARGE_PACKET_MAX, 0);
 		if (len == 0)
 			break;
 		if (len < 1) {
-			fprintf(stderr, "%s: protocol error: no band designator\n", me);
-			return SIDEBAND_PROTOCOL_ERROR;
+			strbuf_addf(&outbuf,
+				    "%s%s: protocol error: no band designator",
+				    outbuf.len ? "\n" : "", me);
+			retval = SIDEBAND_PROTOCOL_ERROR;
+			break;
 		}
-		band = buf[pf] & 0xff;
+		band = buf[0] & 0xff;
+		buf[len] = '\0';
 		len--;
 		switch (band) {
 		case 3:
-			buf[pf] = ' ';
-			buf[pf+1+len] = '\0';
-			fprintf(stderr, "%s\n", buf);
-			return SIDEBAND_REMOTE_ERROR;
+			strbuf_addf(&outbuf, "%s%s", outbuf.len ? "\n" : "",
+				    DISPLAY_PREFIX);
+			maybe_colorize_sideband(&outbuf, buf + 1, len);
+
+			retval = SIDEBAND_REMOTE_ERROR;
+			break;
 		case 2:
-			buf[pf] = ' ';
-			do {
-				char *b = buf;
-				int brk = 0;
+			b = buf + 1;
 
-				/*
-				 * If the last buffer didn't end with a line
-				 * break then we should not print a prefix
-				 * this time around.
-				 */
-				if (skip_pf) {
-					b += pf+1;
-				} else {
-					len += pf+1;
-					brk += pf+1;
+			/*
+			 * Append a suffix to each nonempty line to clear the
+			 * end of the screen line.
+			 *
+			 * The output is accumulated in a buffer and
+			 * each line is printed to stderr using
+			 * write(2) to ensure inter-process atomicity.
+			 */
+			while ((brk = strpbrk(b, "\n\r"))) {
+				int linelen = brk - b;
+
+				if (!outbuf.len)
+					strbuf_addstr(&outbuf, DISPLAY_PREFIX);
+				if (linelen > 0) {
+					maybe_colorize_sideband(&outbuf, b, linelen);
+					strbuf_addstr(&outbuf, suffix);
 				}
 
-				/* Look for a line break. */
-				for (;;) {
-					brk++;
-					if (brk > len) {
-						brk = 0;
-						break;
-					}
-					if (b[brk-1] == '\n' ||
-					    b[brk-1] == '\r')
-						break;
-				}
+				strbuf_addch(&outbuf, *brk);
+				xwrite(2, outbuf.buf, outbuf.len);
+				strbuf_reset(&outbuf);
 
-				/*
-				 * Let's insert a suffix to clear the end
-				 * of the screen line if a line break was
-				 * found.  Also, if we don't skip the
-				 * prefix, then a non-empty string must be
-				 * present too.
-				 */
-				if (brk > (skip_pf ? 0 : (pf+1 + 1))) {
-					char save[FIX_SIZE];
-					memcpy(save, b + brk, sf);
-					b[brk + sf - 1] = b[brk - 1];
-					memcpy(b + brk - 1, suffix, sf);
-					fprintf(stderr, "%.*s", brk + sf, b);
-					memcpy(b + brk, save, sf);
-					len -= brk;
-				} else {
-					int l = brk ? brk : len;
-					fprintf(stderr, "%.*s", l, b);
-					len -= l;
-				}
+				b = brk + 1;
+			}
 
-				skip_pf = !brk;
-				memmove(buf + pf+1, b + brk, len);
-			} while (len);
-			continue;
+			if (*b) {
+				strbuf_addstr(&outbuf, outbuf.len ?
+					    "" : DISPLAY_PREFIX);
+				maybe_colorize_sideband(&outbuf, b, strlen(b));
+			}
+			break;
 		case 1:
-			write_or_die(out, buf + pf+1, len);
-			continue;
+			write_or_die(out, buf + 1, len);
+			break;
 		default:
-			fprintf(stderr, "%s: protocol error: bad band #%d\n",
-				me, band);
-			return SIDEBAND_PROTOCOL_ERROR;
+			strbuf_addf(&outbuf, "%s%s: protocol error: bad band #%d",
+				    outbuf.len ? "\n" : "", me, band);
+			retval = SIDEBAND_PROTOCOL_ERROR;
+			break;
 		}
 	}
-	return 0;
+
+	if (outbuf.len) {
+		strbuf_addch(&outbuf, '\n');
+		xwrite(2, outbuf.buf, outbuf.len);
+	}
+	strbuf_release(&outbuf);
+	return retval;
 }
 
 /*
  * fd is connected to the remote side; send the sideband data
  * over multiplexed packet stream.
  */
-ssize_t send_sideband(int fd, int band, const char *data, ssize_t sz, int packet_max)
+void send_sideband(int fd, int band, const char *data, ssize_t sz, int packet_max)
 {
-	ssize_t ssz = sz;
 	const char *p = data;
 
 	while (sz) {
@@ -148,5 +241,4 @@ ssize_t send_sideband(int fd, int band, const char *data, ssize_t sz, int packet
 		p += n;
 		sz -= n;
 	}
-	return ssz;
 }

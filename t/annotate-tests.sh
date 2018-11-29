@@ -68,6 +68,13 @@ test_expect_success 'blame 1 author' '
 	check_count A 2
 '
 
+test_expect_success 'blame by tag objects' '
+	git tag -m "test tag" testTag &&
+	git tag -m "test tag #2" testTag2 testTag &&
+	check_count -h testTag A 2 &&
+	check_count -h testTag2 A 2
+'
+
 test_expect_success 'setup B lines' '
 	echo "2A quick brown fox jumps over the" >>file &&
 	echo "lazy dog" >>file &&
@@ -313,11 +320,11 @@ test_expect_success 'blame -L ,Y (Y == nlines)' '
 
 test_expect_success 'blame -L ,Y (Y == nlines + 1)' '
 	n=$(expr $(wc -l <file) + 2) &&
-	test_must_fail $PROG -L,$n file
+	check_count -L,$n A 1 B 1 B1 1 B2 1 "A U Thor" 1 C 1 D 1 E 1
 '
 
 test_expect_success 'blame -L ,Y (Y > nlines)' '
-	test_must_fail $PROG -L,12345 file
+	check_count -L,12345 A 1 B 1 B1 1 B2 1 "A U Thor" 1 C 1 D 1 E 1
 '
 
 test_expect_success 'blame -L multiple (disjoint)' '

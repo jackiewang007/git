@@ -23,7 +23,7 @@ static int parse_credential_file(const char *fn,
 		return found_credential;
 	}
 
-	while (strbuf_getline(&line, fh, '\n') != EOF) {
+	while (strbuf_getline_lf(&line, fh) != EOF) {
 		credential_from_url(&entry, line.buf);
 		if (entry.username && entry.password &&
 		    credential_match(c, &entry)) {
@@ -64,7 +64,7 @@ static void rewrite_credential_file(const char *fn, struct credential *c,
 		print_line(extra);
 	parse_credential_file(fn, c, NULL, print_line);
 	if (commit_lock_file(&credential_lock) < 0)
-		die_errno("unable to commit credential store");
+		die_errno("unable to write credential store");
 }
 
 static void store_credential_file(const char *fn, struct credential *c)
@@ -142,7 +142,7 @@ static void lookup_credential(const struct string_list *fns, struct credential *
 			return; /* Found credential */
 }
 
-int main(int argc, char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	const char * const usage[] = {
 		"git credential-store [<options>] <action>",
@@ -168,7 +168,7 @@ int main(int argc, char **argv)
 	if (file) {
 		string_list_append(&fns, file);
 	} else {
-		if ((file = expand_user_path("~/.git-credentials")))
+		if ((file = expand_user_path("~/.git-credentials", 0)))
 			string_list_append_nodup(&fns, file);
 		file = xdg_config_home("credentials");
 		if (file)

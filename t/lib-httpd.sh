@@ -24,7 +24,7 @@
 #    LIB_HTTPD_MODULE_PATH       web server modules path
 #    LIB_HTTPD_PORT              listening port
 #    LIB_HTTPD_DAV               enable DAV
-#    LIB_HTTPD_SVN               enable SVN
+#    LIB_HTTPD_SVN               enable SVN at given location (e.g. "svn")
 #    LIB_HTTPD_SSL               enable SSL
 #
 # Copyright (c) 2008 Clemens Buchacher <drizzd@aon.at>
@@ -98,8 +98,8 @@ then
 	test_skip_or_die $GIT_TEST_HTTPD "no web server found at '$LIB_HTTPD_PATH'"
 fi
 
-HTTPD_VERSION=`$LIB_HTTPD_PATH -v | \
-	sed -n 's/^Server version: Apache\/\([0-9]*\)\..*$/\1/p; q'`
+HTTPD_VERSION=$($LIB_HTTPD_PATH -v | \
+	sed -n 's/^Server version: Apache\/\([0-9]*\)\..*$/\1/p; q')
 
 if test -n "$HTTPD_VERSION"
 then
@@ -132,6 +132,7 @@ prepare_httpd() {
 	cp "$TEST_PATH"/passwd "$HTTPD_ROOT_PATH"
 	install_script broken-smart-http.sh
 	install_script error.sh
+	install_script apply-one-time-sed.sh
 
 	ln -s "$LIB_HTTPD_MODULE_PATH" "$HTTPD_ROOT_PATH/modules"
 
@@ -162,8 +163,10 @@ prepare_httpd() {
 		if test -n "$LIB_HTTPD_SVN"
 		then
 			HTTPD_PARA="$HTTPD_PARA -DSVN"
-			rawsvnrepo="$HTTPD_ROOT_PATH/svnrepo"
-			svnrepo="http://127.0.0.1:$LIB_HTTPD_PORT/svn"
+			LIB_HTTPD_SVNPATH="$rawsvnrepo"
+			svnrepo="http://127.0.0.1:$LIB_HTTPD_PORT/"
+			svnrepo="$svnrepo$LIB_HTTPD_SVN"
+			export LIB_HTTPD_SVN LIB_HTTPD_SVNPATH
 		fi
 	fi
 }
@@ -180,6 +183,7 @@ start_httpd() {
 	if test $? -ne 0
 	then
 		trap 'die' EXIT
+		cat "$HTTPD_ROOT_PATH"/error.log >&4 2>/dev/null
 		test_skip_or_die $GIT_TEST_HTTPD "web server setup failed"
 	fi
 }
@@ -283,4 +287,25 @@ expect_askpass() {
 	} >"$TRASH_DIRECTORY/askpass-expect" &&
 	test_cmp "$TRASH_DIRECTORY/askpass-expect" \
 		 "$TRASH_DIRECTORY/askpass-query"
+}
+
+strip_access_log() {
+	sed -e "
+		s/^.* \"//
+		s/\"//
+		s/ [1-9][0-9]*\$//
+		s/^GET /GET  /
+	" "$HTTPD_ROOT_PATH"/access.log
+}
+
+# Requires one argument: the name of a file containing the expected stripped
+# access log entries.
+check_access_log() {
+	sort "$1" >"$1".sorted &&
+	strip_access_log >access.log.stripped &&
+	sort access.log.stripped >access.log.sorted &&
+	if ! test_cmp "$1".sorted access.log.sorted
+	then
+		test_cmp "$1" access.log.stripped
+	fi
 }

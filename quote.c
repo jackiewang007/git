@@ -43,7 +43,36 @@ void sq_quote_buf(struct strbuf *dst, const char *src)
 	free(to_free);
 }
 
-void sq_quote_argv(struct strbuf *dst, const char** argv, size_t maxlen)
+void sq_quote_buf_pretty(struct strbuf *dst, const char *src)
+{
+	static const char ok_punct[] = "+,-./:=@_^";
+	const char *p;
+
+	for (p = src; *p; p++) {
+		if (!isalpha(*p) && !isdigit(*p) && !strchr(ok_punct, *p)) {
+			sq_quote_buf(dst, src);
+			return;
+		}
+	}
+
+	/* if we get here, we did not need quoting */
+	strbuf_addstr(dst, src);
+}
+
+void sq_quotef(struct strbuf *dst, const char *fmt, ...)
+{
+	struct strbuf src = STRBUF_INIT;
+
+	va_list ap;
+	va_start(ap, fmt);
+	strbuf_vaddf(&src, fmt, ap);
+	va_end(ap);
+
+	sq_quote_buf(dst, src.buf);
+	strbuf_release(&src);
+}
+
+void sq_quote_argv(struct strbuf *dst, const char **argv)
 {
 	int i;
 
@@ -52,8 +81,16 @@ void sq_quote_argv(struct strbuf *dst, const char** argv, size_t maxlen)
 	for (i = 0; argv[i]; ++i) {
 		strbuf_addch(dst, ' ');
 		sq_quote_buf(dst, argv[i]);
-		if (maxlen && dst->len > maxlen)
-			die("Too many or long arguments");
+	}
+}
+
+void sq_quote_argv_pretty(struct strbuf *dst, const char **argv)
+{
+	int i;
+
+	for (i = 0; argv[i]; i++) {
+		strbuf_addch(dst, ' ');
+		sq_quote_buf_pretty(dst, argv[i]);
 	}
 }
 
@@ -81,9 +118,15 @@ static char *sq_dequote_step(char *arg, char **next)
 				*next = NULL;
 			return arg;
 		case '\\':
-			c = *++src;
-			if (need_bs_quote(c) && *++src == '\'') {
-				*dst++ = c;
+			/*
+			 * Allow backslashed characters outside of
+			 * single-quotes only if they need escaping,
+			 * and only if we resume the single-quoted part
+			 * afterward.
+			 */
+			if (need_bs_quote(src[1]) && src[2] == '\'') {
+				*dst++ = src[1];
+				src += 2;
 				continue;
 			}
 		/* Fallthrough */
@@ -418,6 +461,7 @@ void tcl_quote_buf(struct strbuf *sb, const char *src)
 		case '{': case '}':
 		case '$': case '\\': case '"':
 			strbuf_addch(sb, '\\');
+			/* fallthrough */
 		default:
 			strbuf_addch(sb, c);
 			break;
@@ -439,4 +483,41 @@ void tcl_quote_buf(struct strbuf *sb, const char *src)
 		}
 	}
 	strbuf_addch(sb, '"');
+}
+
+void basic_regex_quote_buf(struct strbuf *sb, const char *src)
+{
+	char c;
+
+	if (*src == '^') {
+		/* only beginning '^' is special and needs quoting */
+		strbuf_addch(sb, '\\');
+		strbuf_addch(sb, *src++);
+	}
+	if (*src == '*')
+		/* beginning '*' is not special, no quoting */
+		strbuf_addch(sb, *src++);
+
+	while ((c = *src++)) {
+		switch (c) {
+		case '[':
+		case '.':
+		case '\\':
+		case '*':
+			strbuf_addch(sb, '\\');
+			strbuf_addch(sb, c);
+			break;
+
+		case '$':
+			/* only the end '$' is special and needs quoting */
+			if (*src == '\0')
+				strbuf_addch(sb, '\\');
+			strbuf_addch(sb, c);
+			break;
+
+		default:
+			strbuf_addch(sb, c);
+			break;
+		}
+	}
 }

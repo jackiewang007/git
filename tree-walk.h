@@ -1,8 +1,10 @@
 #ifndef TREE_WALK_H
 #define TREE_WALK_H
 
+struct strbuf;
+
 struct name_entry {
-	const unsigned char *sha1;
+	const struct object_id *oid;
 	const char *path;
 	unsigned int mode;
 };
@@ -13,28 +15,36 @@ struct tree_desc {
 	unsigned int size;
 };
 
-static inline const unsigned char *tree_entry_extract(struct tree_desc *desc, const char **pathp, unsigned int *modep)
+static inline const struct object_id *tree_entry_extract(struct tree_desc *desc, const char **pathp, unsigned int *modep)
 {
 	*pathp = desc->entry.path;
 	*modep = desc->entry.mode;
-	return desc->entry.sha1;
+	return desc->entry.oid;
 }
 
 static inline int tree_entry_len(const struct name_entry *ne)
 {
-	return (const char *)ne->sha1 - ne->path - 1;
+	return (const char *)ne->oid - ne->path - 1;
 }
 
+/*
+ * The _gently versions of these functions warn and return false on a
+ * corrupt tree entry rather than dying,
+ */
+
 void update_tree_entry(struct tree_desc *);
+int update_tree_entry_gently(struct tree_desc *);
 void init_tree_desc(struct tree_desc *desc, const void *buf, unsigned long size);
+int init_tree_desc_gently(struct tree_desc *desc, const void *buf, unsigned long size);
 
 /*
  * Helper function that does both tree_entry_extract() and update_tree_entry()
  * and returns true for success
  */
 int tree_entry(struct tree_desc *, struct name_entry *);
+int tree_entry_gently(struct tree_desc *, struct name_entry *);
 
-void *fill_tree_descriptor(struct tree_desc *desc, const unsigned char *sha1);
+void *fill_tree_descriptor(struct tree_desc *desc, const struct object_id *oid);
 
 struct traverse_info;
 typedef int (*traverse_callback_t)(int n, unsigned long mask, unsigned long dirmask, struct name_entry *entry, struct traverse_info *);
@@ -56,9 +66,10 @@ enum follow_symlinks_result {
 		       */
 };
 
-enum follow_symlinks_result get_tree_entry_follow_symlinks(unsigned char *tree_sha1, const char *name, unsigned char *result, struct strbuf *result_path, unsigned *mode);
+enum follow_symlinks_result get_tree_entry_follow_symlinks(struct object_id *tree_oid, const char *name, struct object_id *result, struct strbuf *result_path, unsigned *mode);
 
 struct traverse_info {
+	const char *traverse_path;
 	struct traverse_info *prev;
 	struct name_entry name;
 	int pathlen;
@@ -70,7 +81,7 @@ struct traverse_info {
 	int show_all_errors;
 };
 
-int get_tree_entry(const unsigned char *, const char *, unsigned char *, unsigned *);
+int get_tree_entry(const struct object_id *, const char *, struct object_id *, unsigned *);
 extern char *make_traverse_path(char *path, const struct traverse_info *info, const struct name_entry *n);
 extern void setup_traverse_info(struct traverse_info *info, const char *base);
 
